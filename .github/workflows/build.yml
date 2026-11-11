@@ -30,8 +30,11 @@ jobs:
           flutter create --platforms=android --org com.subaru.offlinetube .
           mv main.dart.bak lib/main.dart
           mv pubspec.yaml.bak pubspec.yaml
-          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/><application/' android/app/src/main/AndroidManifest.xml
-          flutter pub get
+          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"\/><application android:requestLegacyExternalStorage="true"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' android/app/build.gradle
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle.kts || true
+          flutter pub upgrade
           flutter build apk --release
 
       - name: Upload APK
@@ -39,5 +42,4 @@ jobs:
         with:
           name: OfflineTube-APK
           path: build/app/outputs/flutter-apk/app-release.apk
-
 
