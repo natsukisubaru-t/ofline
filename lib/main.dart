@@ -4,9 +4,28 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:video_player/video_player.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   runApp(const OfflineTubeApp());
+}
+
+Future<Directory> getSaveDirectory(String subFolder) async {
+  try {
+    if (Platform.isAndroid) {
+      await Permission.storage.request();
+      await Permission.manageExternalStorage.request();
+      final extDir = Directory('/storage/emulated/0/Download/OfflineTube/$subFolder');
+      await extDir.create(recursive: true);
+      return extDir;
+    }
+  } catch (_) {}
+  final appDir = await getApplicationDocumentsDirectory();
+  final fallbackDir = Directory('${appDir.path}/$subFolder');
+  if (!await fallbackDir.exists()) {
+    await fallbackDir.create(recursive: true);
+  }
+  return fallbackDir;
 }
 
 class OfflineTubeApp extends StatelessWidget {
@@ -37,6 +56,17 @@ class _MainScreenState extends State<MainScreen> {
     const AutoFetcherPage(),
     const LongVideosPage(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _requestPermissions();
+  }
+
+  Future<void> _requestPermissions() async {
+    await Permission.storage.request();
+    await Permission.manageExternalStorage.request();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -74,13 +104,12 @@ class _ShortsFeedPageState extends State<ShortsFeedPage> {
   }
 
   Future<void> _loadVideos() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final shortsDir = Directory('${dir.path}/shorts');
+    final shortsDir = await getSaveDirectory('shorts');
     if (await shortsDir.exists()) {
       final files = shortsDir
           .listSync()
           .whereType<File>()
-          .where((f) => f.path.endsWith('.mp4'))
+          .where((f) => f.path.endsWith('.mp4') && f.lengthSync() > 1000)
           .toList();
       setState(() => _videos = files);
     }
@@ -225,56 +254,86 @@ class _AutoFetcherPageState extends State<AutoFetcherPage> {
   double _count = 10;
   bool _isDownloading = false;
   String _status = 'Ready to fetch';
+  String _lastError = '';
 
   Future<void> _startAutoDownload() async {
     setState(() {
       _isDownloading = true;
-      _status = 'Searching for new Shorts...';
+      _status = 'Requesting storage permission...';
+      _lastError = '';
     });
 
+    final shortsDir = await getSaveDirectory('shorts');
     final yt = YoutubeExplode();
+
     try {
       final prefs = await SharedPreferences.getInstance();
       final seenIds = prefs.getStringList('seen_ids') ?? [];
-      final dir = await getApplicationDocumentsDirectory();
-      final shortsDir = Directory('${dir.path}/shorts');
-      if (!await shortsDir.exists()) await shortsDir.create(recursive: true);
 
-      final topics = _topicsController.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+      final topics = _topicsController.text
+          .split(',')
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
       int downloaded = 0;
       int target = _count.toInt();
 
       for (final topic in topics) {
         if (downloaded >= target) break;
-        final searchList = await yt.search.search('$topic #shorts');
+        setState(() => _status = 'Searching topic: $topic...');
+        final searchList = await yt.search.search('$topic shorts');
 
         for (final video in searchList) {
           if (downloaded >= target) break;
           if (seenIds.contains(video.id.value)) continue;
-          if (video.duration != null && video.duration!.inSeconds > 90) continue;
+          if (video.duration != null && video.duration!.inSeconds > 120) continue;
 
           setState(() => _status = 'Downloading (${downloaded + 1}/$target):\n${video.title}');
 
           try {
-            final manifest = await yt.videos.streamsClient.getManifest(video.id);
-            final streamInfo = manifest.muxed.withHighestBitrate();
-            final stream = yt.videos.streamsClient.get(streamInfo);
+            final manifest = await yt.videos.streamsClient.getManifest(
+              video.id,
+              ytClients: [
+                YoutubeApiClient.android,
+                YoutubeApiClient.ios,
+                YoutubeApiClient.safari,
+              ],
+            );
 
+            StreamInfo? streamInfo;
+            if (manifest.muxed.isNotEmpty) {
+              streamInfo = manifest.muxed.withHighestBitrate();
+            } else if (manifest.videoOnly.isNotEmpty) {
+              streamInfo = manifest.videoOnly.firstWhere(
+                (s) => s.container.name == 'mp4',
+                orElse: () => manifest.videoOnly.withHighestBitrate(),
+              );
+            }
+
+            if (streamInfo == null) continue;
+
+            final stream = yt.videos.streamsClient.get(streamInfo);
             final file = File('${shortsDir.path}/${video.id.value}.mp4');
             final fileStream = file.openWrite();
             await stream.pipe(fileStream);
             await fileStream.flush();
             await fileStream.close();
 
-            seenIds.add(video.id.value);
-            await prefs.setStringList('seen_ids', seenIds);
-            downloaded++;
-          } catch (_) {}
+            if (await file.exists() && await file.length() > 1000) {
+              seenIds.add(video.id.value);
+              await prefs.setStringList('seen_ids', seenIds);
+              downloaded++;
+            } else {
+              if (await file.exists()) await file.delete();
+            }
+          } catch (err) {
+            setState(() => _lastError = 'Last skip reason: $err');
+          }
         }
       }
-      setState(() => _status = 'Done! Downloaded $downloaded new Shorts.');
+      setState(() => _status = 'Done! Downloaded $downloaded new Shorts.\nSaved in: ${shortsDir.path}');
     } catch (e) {
-      setState(() => _status = 'Error: Check internet or VPN connection.');
+      setState(() => _status = 'Error: $e');
     } finally {
       yt.close();
       setState(() => _isDownloading = false);
@@ -314,6 +373,10 @@ class _AutoFetcherPageState extends State<AutoFetcherPage> {
           ),
           const SizedBox(height: 20),
           Text(_status, textAlign: TextAlign.center, style: const TextStyle(color: Colors.amberAccent)),
+          if (_lastError.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(_lastError, textAlign: TextAlign.center, maxLines: 3, style: const TextStyle(color: Colors.redAccent, fontSize: 11)),
+          ],
         ],
       ),
     );
@@ -340,11 +403,14 @@ class _LongVideosPageState extends State<LongVideosPage> {
   }
 
   Future<void> _loadLongVideos() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final longDir = Directory('${dir.path}/long_videos');
+    final longDir = await getSaveDirectory('long_videos');
     if (await longDir.exists()) {
       setState(() {
-        _longVideos = longDir.listSync().whereType<File>().where((f) => f.path.endsWith('.mp4')).toList();
+        _longVideos = longDir
+            .listSync()
+            .whereType<File>()
+            .where((f) => f.path.endsWith('.mp4') && f.lengthSync() > 1000)
+            .toList();
       });
     }
   }
@@ -358,19 +424,31 @@ class _LongVideosPageState extends State<LongVideosPage> {
       _status = 'Fetching video info...';
     });
 
+    final longDir = await getSaveDirectory('long_videos');
     final yt = YoutubeExplode();
     try {
       final video = await yt.videos.get(url);
       setState(() => _status = 'Downloading: ${video.title}');
 
-      final manifest = await yt.videos.streamsClient.getManifest(video.id);
-      final streamInfo = manifest.muxed.withHighestBitrate();
+      final manifest = await yt.videos.streamsClient.getManifest(
+        video.id,
+        ytClients: [
+          YoutubeApiClient.android,
+          YoutubeApiClient.ios,
+          YoutubeApiClient.safari,
+        ],
+      );
+
+      StreamInfo? streamInfo;
+      if (manifest.muxed.isNotEmpty) {
+        streamInfo = manifest.muxed.withHighestBitrate();
+      } else if (manifest.videoOnly.isNotEmpty) {
+        streamInfo = manifest.videoOnly.withHighestBitrate();
+      }
+
+      if (streamInfo == null) throw Exception('No valid stream found');
+
       final stream = yt.videos.streamsClient.get(streamInfo);
-
-      final dir = await getApplicationDocumentsDirectory();
-      final longDir = Directory('${dir.path}/long_videos');
-      if (!await longDir.exists()) await longDir.create(recursive: true);
-
       final safeTitle = video.title.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
       final file = File('${longDir.path}/$safeTitle.mp4');
       final fileStream = file.openWrite();
@@ -379,10 +457,10 @@ class _LongVideosPageState extends State<LongVideosPage> {
       await fileStream.close();
 
       _urlController.clear();
-      setState(() => _status = 'Download complete!');
+      setState(() => _status = 'Download complete!\nSaved in: ${longDir.path}');
       await _loadLongVideos();
     } catch (e) {
-      setState(() => _status = 'Error! Check link and VPN.');
+      setState(() => _status = 'Error: $e');
     } finally {
       yt.close();
       setState(() => _downloading = false);
