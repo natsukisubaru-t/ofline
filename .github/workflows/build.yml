@@ -31,8 +31,8 @@ jobs:
           mv main.dart.bak lib/main.dart
           mv pubspec.yaml.bak pubspec.yaml
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"\/><application android:requestLegacyExternalStorage="true"/' android/app/src/main/AndroidManifest.xml
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle.kts
-          flutter pub upgrade
+          sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*flutter\.minSdkVersion/minSdk = 24/g' android/app/build.gradle.kts
+          flutter pub get
           flutter build apk --release
 
       - name: Upload APK
