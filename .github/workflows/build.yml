@@ -40,3 +40,4 @@ jobs:
           name: OfflineTube-APK
           path: build/app/outputs/flutter-apk/app-release.apk
 
+
