@@ -23,16 +23,113 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Generate Android files and build APK
+      - name: Generate Android files and embed Python yt-dlp
         run: |
           cp lib/main.dart main.dart.bak
           cp pubspec.yaml pubspec.yaml.bak
           flutter create --platforms=android --org com.subaru.offlinetube .
           mv main.dart.bak lib/main.dart
           mv pubspec.yaml.bak pubspec.yaml
-          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"\/><application android:requestLegacyExternalStorage="true"/' android/app/src/main/AndroidManifest.xml
+
+          # 1. Add permissions and extractNativeLibs (required for embedded Python/yt-dlp binaries)
+          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"\/><application android:requestLegacyExternalStorage="true" android:extractNativeLibs="true"/' android/app/src/main/AndroidManifest.xml
+
+          # 2. Add JitPack repository for youtubedl-android
+          sed -i 's/mavenCentral()/mavenCentral()\n        maven { url = uri("https:\/\/jitpack.io") }/g' android/settings.gradle.kts || true
+          sed -i 's/mavenCentral()/mavenCentral()\n        maven { url "https:\/\/jitpack.io" }/g' android/settings.gradle || true
+
+          # 3. Configure minSdk 24, Lint, Packaging, and youtubedl-android library
           sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*flutter\.minSdkVersion/minSdk = 24/g' android/app/build.gradle.kts
-          sed -i 's/buildTypes {/lint { checkReleaseBuilds = false; abortOnError = false }\n    buildTypes {/g' android/app/build.gradle.kts
+          sed -i 's/buildTypes {/lint { checkReleaseBuilds = false; abortOnError = false }\n    packaging { jniLibs { useLegacyPackaging = true } }\n    buildTypes {/g' android/app/build.gradle.kts
+          cat << 'EOF' >> android/app/build.gradle.kts
+
+          dependencies {
+              implementation("io.github.junkfood02.youtubedl-android:library:0.17.2")
+          }
+          EOF
+
+          # 4. Write Native Kotlin Bridge for Python yt-dlp
+          MAIN_KT=$(find android/app/src/main/kotlin -name "MainActivity.kt")
+          cat << 'EOF' > "$MAIN_KT"
+          package com.subaru.offlinetube
+
+          import androidx.annotation.NonNull
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+          import com.yausername.youtubedl_android.YoutubeDL
+          import com.yausername.youtubedl_android.YoutubeDLRequest
+          import java.io.File
+          import kotlin.concurrent.thread
+
+          class MainActivity: FlutterActivity() {
+              private val CHANNEL = "com.subaru.offlinetube/ytdlp"
+
+              override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  YoutubeDL.getInstance().init(applicationContext)
+
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "updateYtDlp" -> {
+                              thread {
+                                  try {
+                                      val status = YoutubeDL.getInstance().updateYoutubeDL(applicationContext, YoutubeDL.UpdateChannel._NIGHTLY)
+                                      runOnUiThread { result.success(status?.name ?: "UPDATED") }
+                                  } catch (e: Exception) {
+                                      runOnUiThread { result.error("ERR", e.message, null) }
+                                  }
+                              }
+                          }
+                          "downloadShorts" -> {
+                              val topic = call.argument<String>("topic") ?: "shorts"
+                              val limit = call.argument<Int>("limit") ?: 5
+                              val dir = call.argument<String>("dir") ?: ""
+                              thread {
+                                  try {
+                                      val searchCount = limit * 2
+                                      val request = YoutubeDLRequest("ytsearch$searchCount:$topic #shorts")
+                                      request.addOption("-o", "$dir/%(id)s.%(ext)s")
+                                      request.addOption("-f", "best[ext=mp4]/best")
+                                      request.addOption("--match-filter", "duration <= 90 & !is_live")
+                                      request.addOption("--max-downloads", limit.toString())
+                                      request.addOption("--download-archive", "$dir/seen_archive.txt")
+                                      request.addOption("--no-mtime")
+                                      request.addOption("--ignore-errors")
+                                      YoutubeDL.getInstance().execute(request)
+                                      runOnUiThread { result.success("OK") }
+                                  } catch (e: Exception) {
+                                      if (e.message?.contains("Maximum number of downloads") == true) {
+                                          runOnUiThread { result.success("OK") }
+                                      } else {
+                                          runOnUiThread { result.error("ERR", e.message, null) }
+                                      }
+                                  }
+                              }
+                          }
+                          "downloadUrl" -> {
+                              val url = call.argument<String>("url") ?: ""
+                              val dir = call.argument<String>("dir") ?: ""
+                              thread {
+                                  try {
+                                      val request = YoutubeDLRequest(url)
+                                      request.addOption("-o", "$dir/%(title).50s.%(ext)s")
+                                      request.addOption("-f", "best[ext=mp4]/best")
+                                      request.addOption("--no-mtime")
+                                      YoutubeDL.getInstance().execute(request)
+                                      runOnUiThread { result.success("OK") }
+                                  } catch (e: Exception) {
+                                      runOnUiThread { result.error("ERR", e.message, null) }
+                                  }
+                              }
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
+              }
+          }
+          EOF
+
           flutter pub get
           flutter build apk --release --no-shrink
 
