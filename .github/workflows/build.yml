@@ -38,9 +38,10 @@ jobs:
           sed -i 's/mavenCentral()/mavenCentral()\n        maven { url = uri("https:\/\/jitpack.io") }/g' android/settings.gradle.kts || true
           sed -i 's/mavenCentral()/mavenCentral()\n        maven { url "https:\/\/jitpack.io" }/g' android/settings.gradle || true
 
-          # 3. Configure minSdk 24, Lint, Packaging, and youtubedl-android libraries
+          # 3. Configure minSdk 24, Disable R8 Minify/Shrink (Fixes 'dt' crash), and add youtubedl-android
           sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*flutter\.minSdkVersion/minSdk = 24/g' android/app/build.gradle.kts
           sed -i 's/buildTypes {/lint { checkReleaseBuilds = false; abortOnError = false }\n    packaging { jniLibs { useLegacyPackaging = true } }\n    buildTypes {/g' android/app/build.gradle.kts
+          sed -i 's/signingConfig = signingConfigs.getByName("debug")/signingConfig = signingConfigs.getByName("debug")\n            isMinifyEnabled = false\n            isShrinkResources = false/g' android/app/build.gradle.kts
           cat << 'EOF' >> android/app/build.gradle.kts
 
           dependencies {
@@ -67,6 +68,7 @@ jobs:
               private val CHANNEL = "com.subaru.offlinetube/ytdlp"
               private var isInitialized = false
 
+              @Synchronized
               private fun ensureInit() {
                   if (!isInitialized) {
                       YoutubeDL.getInstance().init(applicationContext)
@@ -86,7 +88,8 @@ jobs:
                                       val status = YoutubeDL.getInstance().updateYoutubeDL(applicationContext, YoutubeDL.UpdateChannel._NIGHTLY)
                                       runOnUiThread { result.success(status?.name ?: "UPDATED") }
                                   } catch (e: Throwable) {
-                                      runOnUiThread { result.error("ERR", e.message ?: e.toString(), null) }
+                                      val msg = e.cause?.message ?: e.message ?: e.toString()
+                                      runOnUiThread { result.error("ERR", msg, null) }
                                   }
                               }
                           }
@@ -109,10 +112,11 @@ jobs:
                                       YoutubeDL.getInstance().execute(request)
                                       runOnUiThread { result.success("OK") }
                                   } catch (e: Throwable) {
-                                      if (e.message?.contains("Maximum number of downloads") == true) {
+                                      val msg = e.cause?.message ?: e.message ?: e.toString()
+                                      if (msg.contains("Maximum number of downloads")) {
                                           runOnUiThread { result.success("OK") }
                                       } else {
-                                          runOnUiThread { result.error("ERR", e.message ?: e.toString(), null) }
+                                          runOnUiThread { result.error("ERR", msg, null) }
                                       }
                                   }
                               }
@@ -130,7 +134,8 @@ jobs:
                                       YoutubeDL.getInstance().execute(request)
                                       runOnUiThread { result.success("OK") }
                                   } catch (e: Throwable) {
-                                      runOnUiThread { result.error("ERR", e.message ?: e.toString(), null) }
+                                      val msg = e.cause?.message ?: e.message ?: e.toString()
+                                      runOnUiThread { result.error("ERR", msg, null) }
                                   }
                               }
                           }
@@ -142,7 +147,7 @@ jobs:
           EOF
 
           flutter pub get
-          flutter build apk --release --no-shrink
+          flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
