@@ -49,10 +49,11 @@ jobs:
           }
           EOF
 
-          # 4. Write Crash-Proof Native Kotlin Bridge for Python yt-dlp
+          # 4. Keep exact package name and write Native Kotlin Bridge for Python yt-dlp
           MAIN_KT=$(find android/app/src/main/kotlin -name "MainActivity.kt")
-          cat << 'EOF' > "$MAIN_KT"
-          package com.subaru.offlinetube
+          PKG_LINE=$(grep "^package " "$MAIN_KT")
+          echo "$PKG_LINE" > "$MAIN_KT"
+          cat << 'EOF' >> "$MAIN_KT"
 
           import androidx.annotation.NonNull
           import io.flutter.embedding.android.FlutterActivity
