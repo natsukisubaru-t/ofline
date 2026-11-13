@@ -1,10 +1,11 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
+
+const platform = MethodChannel('com.subaru.offlinetube/ytdlp');
 
 void main() {
   runApp(const OfflineTubeApp());
@@ -56,17 +57,6 @@ class _MainScreenState extends State<MainScreen> {
     const AutoFetcherPage(),
     const LongVideosPage(),
   ];
-
-  @override
-  void initState() {
-    super.initState();
-    _requestPermissions();
-  }
-
-  Future<void> _requestPermissions() async {
-    await Permission.storage.request();
-    await Permission.manageExternalStorage.request();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -252,91 +242,56 @@ class AutoFetcherPage extends StatefulWidget {
 class _AutoFetcherPageState extends State<AutoFetcherPage> {
   final _topicsController = TextEditingController(text: 'anime edits, gaming funny, tech shorts');
   double _count = 10;
-  bool _isDownloading = false;
-  String _status = 'Ready to fetch';
-  String _lastError = '';
+  bool _isBusy = false;
+  String _status = 'Powered by Python yt-dlp Engine';
+
+  Future<void> _updateEngine() async {
+    setState(() {
+      _isBusy = true;
+      _status = 'Updating Python yt-dlp engine to latest version...';
+    });
+    try {
+      final res = await platform.invokeMethod('updateYtDlp');
+      setState(() => _status = 'Engine Status: $res');
+    } catch (e) {
+      setState(() => _status = 'Update Error: $e');
+    } finally {
+      setState(() => _isBusy = false);
+    }
+  }
 
   Future<void> _startAutoDownload() async {
     setState(() {
-      _isDownloading = true;
-      _status = 'Requesting storage permission...';
-      _lastError = '';
+      _isBusy = true;
+      _status = 'Starting Python yt-dlp engine...';
     });
 
-    final shortsDir = await getSaveDirectory('shorts');
-    final yt = YoutubeExplode();
-
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final seenIds = prefs.getStringList('seen_ids') ?? [];
-
+      final shortsDir = await getSaveDirectory('shorts');
       final topics = _topicsController.text
           .split(',')
           .map((e) => e.trim())
           .where((e) => e.isNotEmpty)
           .toList();
-      int downloaded = 0;
-      int target = _count.toInt();
+
+      int totalTarget = _count.toInt();
+      int perTopic = (totalTarget / (topics.isEmpty ? 1 : topics.length)).ceil();
 
       for (final topic in topics) {
-        if (downloaded >= target) break;
-        setState(() => _status = 'Searching topic: $topic...');
-        final searchList = await yt.search.search('$topic shorts');
-
-        for (final video in searchList) {
-          if (downloaded >= target) break;
-          if (seenIds.contains(video.id.value)) continue;
-          if (video.duration != null && video.duration!.inSeconds > 120) continue;
-
-          setState(() => _status = 'Downloading (${downloaded + 1}/$target):\n${video.title}');
-
-          try {
-            final manifest = await yt.videos.streamsClient.getManifest(
-              video.id,
-              ytClients: [
-                YoutubeApiClient.android,
-                YoutubeApiClient.ios,
-                YoutubeApiClient.safari,
-              ],
-            );
-
-            StreamInfo? streamInfo;
-            if (manifest.muxed.isNotEmpty) {
-              streamInfo = manifest.muxed.withHighestBitrate();
-            } else if (manifest.videoOnly.isNotEmpty) {
-              streamInfo = manifest.videoOnly.firstWhere(
-                (s) => s.container.name == 'mp4',
-                orElse: () => manifest.videoOnly.withHighestBitrate(),
-              );
-            }
-
-            if (streamInfo == null) continue;
-
-            final stream = yt.videos.streamsClient.get(streamInfo);
-            final file = File('${shortsDir.path}/${video.id.value}.mp4');
-            final fileStream = file.openWrite();
-            await stream.pipe(fileStream);
-            await fileStream.flush();
-            await fileStream.close();
-
-            if (await file.exists() && await file.length() > 1000) {
-              seenIds.add(video.id.value);
-              await prefs.setStringList('seen_ids', seenIds);
-              downloaded++;
-            } else {
-              if (await file.exists()) await file.delete();
-            }
-          } catch (err) {
-            setState(() => _lastError = 'Last skip reason: $err');
-          }
-        }
+        setState(() => _status = 'yt-dlp is fetching "$topic" shorts...\n(Please wait 1-2 minutes)');
+        await platform.invokeMethod('downloadShorts', {
+          'topic': topic,
+          'limit': perTopic,
+          'dir': shortsDir.path,
+        });
       }
-      setState(() => _status = 'Done! Downloaded $downloaded new Shorts.\nSaved in: ${shortsDir.path}');
+
+      final files = shortsDir.listSync().where((f) => f.path.endsWith('.mp4')).length;
+      setState(() => _status = 'Done! Total Shorts ready in folder: $files\nSaved in: ${shortsDir.path}');
     } catch (e) {
-      setState(() => _status = 'Error: $e');
+      setState(() => _status = 'yt-dlp Error:\n$e');
     } finally {
-      yt.close();
-      setState(() => _isDownloading = false);
+      setState(() => _isBusy = false);
     }
   }
 
@@ -348,35 +303,37 @@ class _AutoFetcherPageState extends State<AutoFetcherPage> {
         mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          OutlinedButton.icon(
+            onPressed: _isBusy ? null : _updateEngine,
+            icon: const Icon(Icons.system_update_alt),
+            label: const Text('Update yt-dlp Engine (Run once if needed)'),
+          ),
+          const SizedBox(height: 20),
           const Text('Topics (comma separated):', style: TextStyle(fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           TextField(
             controller: _topicsController,
             decoration: const InputDecoration(border: OutlineInputBorder()),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 20),
           Text('Download limit: ${_count.toInt()} videos'),
           Slider(
             value: _count,
-            min: 5,
-            max: 40,
-            divisions: 7,
+            min: 3,
+            max: 30,
+            divisions: 9,
             label: _count.toInt().toString(),
-            onChanged: _isDownloading ? null : (v) => setState(() => _count = v),
+            onChanged: _isBusy ? null : (v) => setState(() => _count = v),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           ElevatedButton.icon(
             style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16), backgroundColor: Colors.redAccent),
-            onPressed: _isDownloading ? null : _startAutoDownload,
-            icon: _isDownloading ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.download),
-            label: Text(_isDownloading ? 'Downloading...' : 'Start Auto Fetch'),
+            onPressed: _isBusy ? null : _startAutoDownload,
+            icon: _isBusy ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.download),
+            label: Text(_isBusy ? 'yt-dlp Working...' : 'Start Auto Fetch (yt-dlp)'),
           ),
           const SizedBox(height: 20),
-          Text(_status, textAlign: TextAlign.center, style: const TextStyle(color: Colors.amberAccent)),
-          if (_lastError.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Text(_lastError, textAlign: TextAlign.center, maxLines: 3, style: const TextStyle(color: Colors.redAccent, fontSize: 11)),
-          ],
+          Text(_status, textAlign: TextAlign.center, style: const TextStyle(color: Colors.amberAccent, fontSize: 13)),
         ],
       ),
     );
@@ -421,48 +378,22 @@ class _LongVideosPageState extends State<LongVideosPage> {
 
     setState(() {
       _downloading = true;
-      _status = 'Fetching video info...';
+      _status = 'yt-dlp is downloading video...\n(Works with YouTube & Instagram Reels!)';
     });
 
-    final longDir = await getSaveDirectory('long_videos');
-    final yt = YoutubeExplode();
     try {
-      final video = await yt.videos.get(url);
-      setState(() => _status = 'Downloading: ${video.title}');
-
-      final manifest = await yt.videos.streamsClient.getManifest(
-        video.id,
-        ytClients: [
-          YoutubeApiClient.android,
-          YoutubeApiClient.ios,
-          YoutubeApiClient.safari,
-        ],
-      );
-
-      StreamInfo? streamInfo;
-      if (manifest.muxed.isNotEmpty) {
-        streamInfo = manifest.muxed.withHighestBitrate();
-      } else if (manifest.videoOnly.isNotEmpty) {
-        streamInfo = manifest.videoOnly.withHighestBitrate();
-      }
-
-      if (streamInfo == null) throw Exception('No valid stream found');
-
-      final stream = yt.videos.streamsClient.get(streamInfo);
-      final safeTitle = video.title.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-      final file = File('${longDir.path}/$safeTitle.mp4');
-      final fileStream = file.openWrite();
-      await stream.pipe(fileStream);
-      await fileStream.flush();
-      await fileStream.close();
+      final longDir = await getSaveDirectory('long_videos');
+      await platform.invokeMethod('downloadUrl', {
+        'url': url,
+        'dir': longDir.path,
+      });
 
       _urlController.clear();
       setState(() => _status = 'Download complete!\nSaved in: ${longDir.path}');
       await _loadLongVideos();
     } catch (e) {
-      setState(() => _status = 'Error: $e');
+      setState(() => _status = 'Error:\n$e');
     } finally {
-      yt.close();
       setState(() => _downloading = false);
     }
   }
@@ -477,7 +408,7 @@ class _LongVideosPageState extends State<LongVideosPage> {
           TextField(
             controller: _urlController,
             decoration: const InputDecoration(
-              labelText: 'Paste YouTube Video URL here',
+              labelText: 'Paste YouTube or Instagram Reel URL',
               border: OutlineInputBorder(),
             ),
           ),
@@ -485,11 +416,11 @@ class _LongVideosPageState extends State<LongVideosPage> {
           ElevatedButton.icon(
             onPressed: _downloading ? null : _downloadByLink,
             icon: const Icon(Icons.download),
-            label: Text(_downloading ? 'Downloading...' : 'Download Video'),
+            label: Text(_downloading ? 'Downloading...' : 'Download Video (yt-dlp)'),
           ),
           if (_status.isNotEmpty) Padding(padding: const EdgeInsets.all(8), child: Text(_status, textAlign: TextAlign.center)),
           const Divider(height: 24),
-          const Text('Saved Long Videos:', style: TextStyle(fontWeight: FontWeight.bold)),
+          const Text('Saved Videos:', style: TextStyle(fontWeight: FontWeight.bold)),
           Expanded(
             child: ListView.builder(
               itemCount: _longVideos.length,
